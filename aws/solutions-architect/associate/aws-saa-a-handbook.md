@@ -1,4 +1,4 @@
-# AWS Certified Solutions Architect - Associate Handbook
+# AWS Certified Solutions Architect Associate Handbook
 
 ## Introduction
 
