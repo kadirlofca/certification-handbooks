@@ -61,12 +61,13 @@ IAM (Identity and Access Management) is a global service used to manage access t
 1.  **Users:** Represent a person or service. By default, new users have **no permissions**.
 2.  **Groups:** A collection of users. Permissions attached to a group apply to all users in that group. Best practice: Attach policies to groups, not individual users.
 3.  **Roles:** An identity that you can create in your account that has specific permissions. Roles are **assumed** by users, applications, or AWS services. They provide temporary security credentials.
+    *   **ECS Task Roles:** When running containers in ECS, assign an **IAM Task Role** to the task definition (not the EC2 instance). Each task gets its own role with only the permissions it needs (e.g., publish to SQS). This is more secure than attaching permissions to the EC2 instance profile, which would grant all containers on that instance the same permissions.
 4.  **Policies:** JSON documents that define permissions.
 
 **Types of Policies:**
 *   **Identity-Based Policies:** Attached to a User, Group, or Role. Defines *what that identity can do*.
 *   **Resource-Based Policies:** Attached to a resource (e.g., S3 Bucket Policy, SQS Queue Policy, KMS Key Policy). Defines *who can access this resource*.
-    *   *Note:* The "Principal" element is required in Resource-based policies to specify who is allowed.
+    *   *Note:* The "Principal" element is **required** in Resource-based policies to specify who is allowed. A common error: applying a bucket policy that omits the `"Principal"` field will be rejected by S3. For example, to allow all accounts to write to a bucket, you must include `"Principal": "*"` or `"Principal": {"AWS": "arn:aws:iam::ACCOUNT-ID:root"}`.
 *   **Permissions Boundaries:** An advanced feature to set the maximum permissions an identity-based policy can grant to an IAM entity.
 
 **Decision Logic:**
@@ -98,6 +99,12 @@ Using a single account for everything is a security risk and unmanageable at sca
     *   **Consolidated Billing:** Pay for all accounts via a single payment method.
     *   **Service Control Policies (SCPs):** A type of organization policy that manages permissions in your organization. SCPs (Service Control Policies) offer central control over the maximum available permissions for all accounts in your organization. *SCPs (Service Control Policies) do not grant permissions; they filter them.*
 *   **AWS Control Tower:** A service that effectively automates the set-up of a multi-account environment using AWS Organizations and best practices (Landing Zone).
+
+### 1.1.5 AWS Directory Service
+
+*   **AWS Managed Microsoft AD:** A fully managed Active Directory hosted on AWS. Use when you need a real Microsoft AD in the cloud (e.g., to support SQL Server, .NET apps, or other services that require AD). Removes the need to self-manage a Domain Controller on EC2.
+*   **AD Connector:** A proxy that redirects directory requests to your on-premises AD. No caching, no data stored in AWS.
+*   *Best Practice:* If you have a public-facing website on EC2 that also runs a Domain Controller, **separate the workloads**. Move the AD to AWS Managed Microsoft AD and keep the web server on its own EC2 instance. This improves security (reduces attack surface) and minimizes admin overhead.
 
 ---
 
@@ -137,18 +144,28 @@ Security in a Virtual Private Cloud (VPC) works in layers.
 | **Rules** | Allow rules only. (Implicit deny at the end). | Allow and Deny rules. |
 | **Order** | All rules evaluated before decision. | Processed in number order. |
 | **Use Case** | First line of defense for EC2 (Elastic Compute Cloud)/RDS (Relational Database Service)/ENI (Elastic Network Interface). | Network segmentation, blocking specific IPs (Internet Protocols). |
+| **Ephemeral Ports** | Not needed (Stateful). | **Must allow outbound** (1024-65535) for return traffic from the internet. |
+
+**Least Privilege with Security Groups (Multi-Tier Architectures):**
+When designing multi-tier applications (e.g., ALB -> Web Tier -> App Tier -> DB Tier), use **security group referencing** to enforce least privilege:
+*   The Web tier SG allows inbound HTTP only from the ALB's SG.
+*   The App tier SG allows inbound traffic only from the Web tier's SG on the specific application port.
+*   The DB tier SG allows inbound traffic only from the App tier's SG on port 3306/5432.
+*   *Key:* Each SG references the SG ID of the tier above it, not broad CIDR ranges. Review both **ingress and egress** rules — restrict egress to only the ports and destinations each tier needs.
 
 ### 1.2.2 Network Segmentation
 
 *   **Public Subnet:** Has a route to an Internet Gateway (IGW). Used for resources that must face the internet (e.g., Load Balancers, Bastion Hosts).
 *   **Private Subnet:** No direct route to the Internet. Used for backend servers, databases, and application logic.
     *   **NAT (Network Address Translation) Gateway:** Allows instances in a private subnet to access the internet (e.g., for updates) but prevents the internet from initiating connections to instances. Deployed in a *Public Subnet*.
+        *   *High Availability:* A single NAT Gateway lives in one AZ. If that AZ fails, private subnets in other AZs lose internet access. For fault tolerance, **deploy one NAT Gateway per AZ** and configure each private subnet's route table to use the NAT Gateway in its own AZ. This ensures each AZ can independently reach external services.
 
 ### 1.2.3 Secure Access to AWS Services
 
 *   **VPC Endpoints:** Allow you to connect your VPC to AWS services privately without leaving the Amazon network (no Internet Gateway required).
     *   **Gateway Endpoints:** Used for **S3 (Simple Storage Service)** and **DynamoDB**. Defined in route tables. Free of charge.
     *   **Interface Endpoints (PrivateLink):** Used for most other services (e.g., SNS (Simple Notification Service), SQS (Simple Queue Service), EC2 (Elastic Compute Cloud)). Creates an ENI (Elastic Network Interface) in your subnet. Costs money.
+*   **VPC Endpoint Services (PrivateLink for Your Own Services):** You can expose your own application as a PrivateLink-powered endpoint service. This allows consumers in **other AWS accounts** to access your service privately without traversing the internet. Requires a **Network Load Balancer (NLB)** in front of your application. The consumer creates an Interface Endpoint in their VPC pointing to your service. Use case: transmitting sensitive data (e.g., PHI) to thousands of accounts with fault-tolerant, private routing.
 
 ### 1.2.4 Application Security Services
 
@@ -158,6 +175,10 @@ Security in a Virtual Private Cloud (VPC) works in layers.
     *   **Advanced:** Paid, adds L7 (Layer 7) protection, access to DDoS (Distributed Denial of Service) response team (DRT), and cost protection against spikes.
 *   **AWS Inspector:** Automated security assessment service that helps improve the security and compliance of applications deployed on AWS (EC2 (Elastic Compute Cloud) vulnerability scanning).
 *   **Amazon GuardDuty:** Intelligent threat detection service. Uses ML (Machine Learning) to analyze CloudTrail logs, VPC (Virtual Private Cloud) Flow Logs, and DNS (Domain Name System) logs to detect anomalies (e.g., crypto mining, unauthorized access).
+*   **AWS Certificate Manager (ACM):** Provision, manage, and deploy SSL/TLS certificates.
+    *   Integrates with ALB (Application Load Balancer), CloudFront, and API (Application Programming Interface) Gateway.
+    *   *Cost:* Public certificates are free. Private certificates (Private CA) have a monthly fee.
+*   **AWS Firewall Manager:** Central management of WAF (Web Application Firewall), Shield Advanced, and Security Group rules across your entire AWS Organization.
 
 ### 1.2.5 Secrets Management
 
@@ -208,7 +229,17 @@ KMS (Key Management Service) is a managed service for creating and managing cryp
 *   **Asymmetric Keys:** Public/Private key pair. Used for signing and verification or encryption outside AWS.
 *   **CloudHSM:** dedicated hardware security module. Use if you need *single-tenant* hardware or specific compliance (FIPS 140-2 Level 3). KMS is FIPS 140-2 Level 2.
 
-### 1.3.3 S3 Data Security
+### 1.3.3 Encrypting Existing Unencrypted RDS Databases
+
+You **cannot** enable encryption on an existing unencrypted RDS instance directly. The process is:
+1.  Create a **snapshot** of the unencrypted RDS instance.
+2.  **Copy** the snapshot and enable encryption during the copy (specify a KMS key).
+3.  **Restore** a new RDS instance from the encrypted snapshot.
+4.  Update your application to point to the new encrypted instance, then delete the old unencrypted instance.
+
+*Note:* This same process applies to encrypting existing unencrypted backups — copy the snapshot with encryption, then restore. All future automated backups and snapshots of an encrypted instance are also encrypted.
+
+### 1.3.4 S3 Data Security
 
 *   **Server-Side Encryption (SSE):**
     *   **SSE-S3 (Server-Side Encryption with S3 Managed Keys):** Keys handled/managed by S3 (Simple Storage Service) (AES-256).
@@ -261,8 +292,12 @@ Resiliency is the ability of a workload to recover from infrastructure or servic
         *   *Target Tracking:* "Keep CPU at 50%." (Simplest to set up).
         *   *Simple/Step Scaling:* "Add 2 units when alarm breaches."
         *   *Scheduled Scaling:* "Scale out at 9 AM on Monday."
+    *   **Default Termination Policy:** When scaling in, ASG first selects the AZ with the **most instances** (to rebalance across AZs). Within that AZ, it terminates the instance with the **oldest launch template/configuration**. If there is a tie, it terminates the instance **closest to the next billing hour**.
+    *   **EC2 Service Quotas:** Each AWS account has default limits on the number of instances you can launch per region. If you see `EC2 QUOTA EXCEEDED`, you need to request a **Service Quota increase** via the AWS Service Quotas console (or open a support case). This is not a code or configuration fix — it is an account-level limit.
 *   **Load Balancing (ELB (Elastic Load Balancing)):** Distributes incoming application traffic across multiple targets (EC2 (Elastic Compute Cloud) instances, containers, IP (Internet Protocol) addresses).
     *   **Application Load Balancer (ALB):** Layer 7 (HTTP (Hypertext Transfer Protocol)/HTTPS (Hypertext Transfer Protocol Secure)). Supports path-based routing, host-based routing, and containers.
+        *   *HTTPS Listener + ACM:* Configure an ALB **HTTPS listener** with an **ACM (AWS Certificate Manager) certificate** for SSL/TLS termination at the load balancer. Clients connect securely over HTTPS; ALB decrypts and forwards traffic to backend targets over HTTP on the private network.
+        *   *Security Group Chaining Pattern:* Layer security groups to isolate the database: **ALB SG** (allow inbound 443 from 0.0.0.0/0) → **Web Server SG** (allow inbound 80 only from ALB SG) → **RDS SG** (allow inbound 3306/5432 only from Web Server SG). The database is never directly reachable from the internet or even from the ALB — only the web tier can talk to it.
     *   **Network Load Balancer (NLB):** Layer 4 (TCP (Transmission Control Protocol)/UDP (User Datagram Protocol)). Ultra-high performance, static IP (Internet Protocol) addresses.
     *   **Gateway Load Balancer (GWLB):** Used for deploying third-party virtual appliances (firewalls).
 
@@ -273,10 +308,13 @@ Decoupling ensures that components of an application can scale and fail independ
 *   **Amazon SQS (Simple Queue Service):** Fully managed message queuing service.
     *   **Standard Queue:** Unlimited throughput, at-least-once delivery, best-effort ordering.
     *   **FIFO (First-In-First-Out) Queue:** Preserves order (FIFO (First-In-First-Out)), exactly-once processing, limited throughput (300/s without batching).
+    *   **Dead Letter Queue (DLQ):** A separate SQS queue where messages are sent after failing processing a configured number of times (`maxReceiveCount`). Use case: a microservice fails to process a message after N retries — the message moves to the DLQ for investigation instead of being lost or blocking the queue. Configure a **redrive policy** on the source queue to specify the DLQ ARN and max receive count.
     *   *Use Case:* Buffer requests between a web server and a backend worker.
+    *   *Async Offloading Pattern:* If an API endpoint triggers a long-running operation (e.g., calling an external service), do not make the caller wait. Instead, place the request on an SQS queue, return a 202 Accepted immediately, and have a backend worker process the queue. This prevents client timeouts and reduces overall system latency.
 *   **Amazon SNS (Simple Notification Service):** Pub/Sub (Publish/Subscribe) messaging. One message sent to a topic is delivered to multiple subscribers (Email, SQS (Simple Queue Service), Lambda, HTTP (Hypertext Transfer Protocol)).
 *   **Amazon EventBridge:** Serverless event bus. Connects applications using data from your own apps, SaaS (Software as a Service) apps, and AWS services.
 *   **Amazon API (Application Programming Interface) Gateway:** "Front door" for applications to access data, business logic, or functionality from your backend services.
+*   **Static Frontend Decoupling Pattern:** Replace EC2-to-EC2 monoliths by hosting the static frontend (HTML/CSS/JS) on **S3 + CloudFront** (globally cached, no servers to manage). The frontend calls **API Gateway** for backend logic, and API Gateway invokes Lambda or forwards to EC2/ECS. Use **SQS** to buffer between the API layer and backend workers. This pattern eliminates tight coupling between presentation and business tiers and scales each layer independently.
 
 ### 2.1.4 Serverless and Microservices
 
@@ -285,6 +323,14 @@ Decoupling ensures that components of an application can scale and fail independ
     *   *Event-Driven:* Triggered by S3 (Simple Storage Service), DynamoDB, API (Application Programming Interface) Gateway, etc.
 *   **Amazon ECS (Elastic Container Service)/EKS (Elastic Kubernetes Service):** Container orchestration.
     *   **Fargate:** Serverless compute engine for containers. Removes the need to provision and manage servers (EC2 (Elastic Compute Cloud) instances) for your cluster.
+
+### 2.1.5 Deployment Strategies
+
+*   **Blue/Green Deployment:** Run two identical environments (Blue = current, Green = new). Deploy and test the new version on Green. Once validated, switch traffic from Blue to Green (e.g., update Route 53 weighted record, or swap ALB target groups). If a bug is found, instantly roll back by switching traffic back to Blue.
+    *   *Immutable Infrastructure:* Combine blue/green with immutable instances — never patch running servers; always deploy fresh AMIs or containers. Use **Launch Templates** with new AMIs for each release.
+*   **Canary Deployment:** Route a small percentage of traffic (e.g., 10%) to the new version. Monitor for errors. Gradually increase traffic if healthy.
+*   **Rolling Deployment:** Replace instances in batches. Some instances run old code while others run new code during the rollout.
+*   *Best Practice:* Use blue/green to **test before sending production traffic** and to **limit the blast radius** of application bugs. AWS services that support blue/green: Route 53 (DNS swap), ALB (target group swap), CodeDeploy, Elastic Beanstalk (URL swap).
 
 ---
 
@@ -319,12 +365,26 @@ Decoupling ensures that components of an application can scale and fail independ
 *   **Availability Zones (AZ):** One or more discrete data centers with redundant power, networking, and connectivity in an AWS Region.
 *   **Edge Locations:** Used by CloudFront and Route 53 to cache content closer to users.
 
-### 2.2.2 Database Resiliency
+### 2.2.2 Compute Resiliency (Auto Scaling)
 
+*   **Auto Scaling Group (ASG) Health Checks:**
+    *   **EC2 Health Checks (Default):** Checks the status of the instance (Running/Stopped). Does not know if the app is crashed.
+    *   **ELB (Elastic Load Balancing) Health Checks:** If the Load Balancer says an instance is "Unhealthy", the ASG terminates it and replaces it.
+    *   **Health Check Grace Period:** Time to wait before checking a new instance (allows app to boot up).
+*   **Suspended Processes:** You can pause ASG actions (e.g., stop it from terminating instances while you are debugging).
+*   **Cooldown Period:** Time to wait after a scaling action before another one can occur.
+
+### 2.2.3 Storage and Database Resiliency
+
+*   **Amazon S3 Replication:**
+    *   **CRR (Cross-Region Replication):** Replicate data across different Regions. Used for compliance and DR (Disaster Recovery).
+    *   **SRR (Same-Region Replication):** Replicate data within the same Region. Used for log aggregation or account isolation.
+    *   *Requirement:* **Versioning** must be enabled on both source and destination buckets.
 *   **Amazon RDS (Relational Database Service) Multi-AZ (Availability Zone):**
     *   *Purpose:* High Availability (HA) / Disaster Recovery (DR).
     *   *Mechanism:* Synchronous replication to a standby instance in a different AZ (Availability Zone).
-    *   *Failover:* Automatic update of DNS (Domain Name System) endpoint if primary fails.
+    *   *Failover:* Automatic. The **DNS (Domain Name System) record** CNAME is updated to point to the standby. No application code changes needed.
+    *   *Trigger:* Failure of primary AZ, primary instance failure, or manual reboot with failover.
 *   **Amazon RDS (Relational Database Service) Read Replicas:**
     *   *Purpose:* Scalability (Offload read traffic).
     *   *Mechanism:* Asynchronous replication.
@@ -334,10 +394,19 @@ Decoupling ensures that components of an application can scale and fail independ
     *   *Global Database:* Replicate data to another Region for DR (Disaster Recovery) (latency < 1s).
 *   **DynamoDB Global Tables:** Multi-region, multi-active replication.
 
-### 2.2.3 Routing and Failover (Route 53)
+**Inherent High Availability of Managed/Serverless Services:**
+*   **AWS Lambda:** Automatically runs across multiple AZs — no configuration needed for HA.
+*   **Amazon DynamoDB:** Data is automatically replicated across multiple AZs within a region. Already highly available by default.
+*   **Amazon RDS:** HA is **not** automatic. You must explicitly enable **Multi-AZ** deployment. If an architecture uses Lambda + DynamoDB + RDS, the action item for HA is to enable Multi-AZ on RDS.
+
+### 2.2.4 Routing and Failover (Route 53)
 
 Amazon Route 53 is a highly available and scalable cloud DNS (Domain Name System) web service.
 
+*   **Health Checks:**
+    *   **Endpoint Monitoring:** Checks the health of an IP address or domain name (HTTP/HTTPS/TCP).
+    *   **Calculated Health Checks:** Monitors other health checks (e.g., fail if 2 out of 3 endpoints are down).
+    *   **CloudWatch Alarms:** Monitor application-specific metrics (e.g., 5xx error rate) to trigger failover.
 *   **Simple Routing:** One record, multiple IPs (Internet Protocol) (random). No health checks.
 *   **Weighted Routing:** Split traffic based on assigned weights (e.g., 80% to V1, 20% to V2).
 *   **Latency-Based Routing:** Route to the region with the lowest latency for the user.
@@ -345,12 +414,13 @@ Amazon Route 53 is a highly available and scalable cloud DNS (Domain Name System
 *   **Geolocation Routing:** Route based on user location (e.g., users in France go to French servers).
 *   **AWS Global Accelerator:** Uses AWS global network to improve availability and performance. Provides static IPs (Internet Protocols). Good for non-HTTP (Hypertext Transfer Protocol) traffic (gaming, IoT (Internet of Things)).
 
-### 2.2.4 Disaster Recovery Strategies
+### 2.2.5 Disaster Recovery Strategies
 
 Ordered from cheapest/slowest to most expensive/fastest:
 
 1.  **Backup and Restore:** Data is backed up to S3. In disaster, restore data and rebuild infra. (High RPO/RTO).
-2.  **Pilot Light:** Critical core elements (DB) are configured and running (usually small). App servers are off/not provisioned. In disaster, turn on app servers and scale up DB.
+2.  **Pilot Light:** Critical core elements (DB) are configured and stopped. App servers are off/not provisioned. In disaster, turn on app servers and scale up DB.
+    *   *Exam Tip:* Pilot Light is the go-to answer when: (a) budget is constrained (cannot replicate entire architecture), (b) the secondary region should not be used unless necessary, and (c) RTO is moderate (e.g., 30 minutes). Typically involves an RDS cross-region read replica or Aurora Global Database in the DR region, with AMIs and launch templates pre-configured but no running compute.
 3.  **Warm Standby:** A scaled-down version of the fully functional environment is always running. In disaster, scale up everything.
 4.  **Multi-Site Active/Active:** Full capacity running in multiple regions. Traffic flows to both. (Zero RPO/RTO possible).
 
@@ -385,26 +455,24 @@ Performance efficiency is about using computing resources efficiently to meet sy
 
 ### 3.1.1 Storage Types and Use Cases
 
-| Storage Type | Service | Characteristics | Use Case |
-| :--- | :--- | :--- | :--- |
-| **Block** | **Amazon EBS (Elastic Block Store)** | Low latency, persistent, mountable to one EC2 (Elastic Compute Cloud) (mostly). | Operating systems, databases (high IOPS (Input/Output Operations Per Second)). |
-| | **Instance Store** | Ephemeral (temporary), physically attached to host. Highest performance. | Cache, buffers, temporary content. Data is lost on stop/terminate. |
-| **File** | **Amazon EFS (Elastic File System)** | Shared file system (NFS (Network File System)), Linux only, regional, elastic. | CMS (Content Management System), shared repositories, lift-and-shift web apps. |
-| | **Amazon FSx for Windows** | SMB (Server Message Block) protocol, Windows native. | Windows file shares, AD (Active Directory) integration. |
-| | **Amazon FSx for Lustre** | HPC (High-Performance Computing). | Machine learning, video processing. |
-| **Object** | **Amazon S3 (Simple Storage Service)** | Flat structure (key-value), infinite scale, HTTP (Hypertext Transfer Protocol) access. | Static websites, backups, media hosting, data lakes. |
-
-### 3.1.2 S3 Performance
-
-*   **Multipart Upload:** Recommended for files > 100MB. Required for files > 5GB. Parallelizes uploads for speed.
-*   **S3 Transfer Acceleration:** Uses AWS Edge Locations to speed up uploads over the public internet.
-
-### 3.1.3 EBS Volume Types
-
-*   **General Purpose SSD (Solid State Drive) (gp2/gp3):** Balance of price and performance. Boot volumes, dev/test, low-latency apps.
-*   **Provisioned IOPS (Input/Output Operations Per Second) SSD (Solid State Drive) (io1/io2):** Highest performance. Critical databases requiring sustained IOPS > 16,000.
-*   **Throughput Optimized HDD (Hard Disk Drive) (st1):** Big data, data warehouses, log processing. Sequential I/O (Input/Output).
-*   **Cold HDD (Hard Disk Drive) (sc1):** Lowest cost. Infrequent access file servers.
+*   **Block Storage**
+    *   **Amazon EBS (Elastic Block Store):** Low latency, persistent, mountable to one EC2 (Elastic Compute Cloud) (mostly). Use Case: Operating systems, databases (high IOPS (Input/Output Operations Per Second)).
+        *   **Volume Types:**
+            *   *General Purpose SSD (gp2/gp3):* Balance of price and performance. Boot volumes, dev/test, low-latency apps.
+            *   *Provisioned IOPS SSD (io1/io2):* Highest performance. Critical databases requiring sustained IOPS > 16,000. Best for workloads needing **high random disk reads and writes with consistent performance** and long-term persistence (e.g., relational databases, I/O-intensive NoSQL). io2 Block Express supports up to 256,000 IOPS and 99.999% durability.
+            *   *Throughput Optimized HDD (st1):* Big data, data warehouses, log processing. Sequential I/O.
+            *   *Cold HDD (sc1):* Lowest cost. Infrequent access file servers.
+    *   **Instance Store:** Ephemeral (temporary), physically attached to host. Highest performance. Use Case: Cache, buffers, temporary content. Data is lost on stop/terminate.
+*   **File Storage**
+    *   **Amazon EFS (Elastic File System):** Shared file system (NFS (Network File System)), Linux only, regional, elastic. Use Case: CMS (Content Management System), shared repositories, lift-and-shift web apps.
+        *   *EFS with ECS:* ECS tasks (both EC2 and Fargate launch types) can mount EFS volumes for **shared, persistent storage** across tasks and AZs. When hundreds of tasks need to read/write output data concurrently, EFS provides the highest throughput because it scales automatically and supports thousands of concurrent connections. For workloads under 1 TB with many concurrent writers, EFS (with Bursting or Provisioned throughput) is preferred over EBS (single-attach) or S3 (higher latency for random writes).
+    *   **Amazon FSx for Windows:** SMB (Server Message Block) protocol, Windows native. Use Case: Windows file shares, AD (Active Directory) integration.
+    *   **Amazon FSx for Lustre:** HPC (High-Performance Computing). Use Case: Machine learning, video processing.
+*   **Object Storage**
+    *   **Amazon S3 (Simple Storage Service):** Flat structure (key-value), infinite scale, HTTP (Hypertext Transfer Protocol) access. Use Case: Static websites, backups, media hosting, data lakes.
+        *   **Performance:**
+            *   *Multipart Upload:* Recommended for files > 100MB. Required for files > 5GB. Parallelizes uploads for speed.
+            *   *S3 Transfer Acceleration:* Uses AWS Edge Locations to speed up uploads over the public internet.
 
 ---
 
@@ -435,12 +503,13 @@ Performance efficiency is about using computing resources efficiently to meet sy
 
 ### 3.3.1 Database Selection
 
-| Requirement | Service | Engine |
-| :--- | :--- | :--- |
-| **Relational (SQL (Structured Query Language))** | **RDS (Relational Database Service) / Aurora** | MySQL, Postgres, Oracle, SQL Server. Use for structured data, joins, transactions (ACID (Atomicity, Consistency, Isolation, Durability)). |
-| **NoSQL (Not Only SQL) (Key-Value)** | **DynamoDB** | High throughput, millisecond latency, simple queries. Shopping carts, user profiles. |
-| **In-Memory** | **ElastiCache** | Microsecond latency. Caching, leaderboards, session store. |
-| **Data Warehouse** | **Redshift** | OLAP (Online Analytical Processing). Complex queries on petabytes of data. Columnar storage. |
+*   **Relational (SQL (Structured Query Language)):** **RDS (Relational Database Service) / Aurora** - MySQL, Postgres, Oracle, SQL Server. Use for structured data, joins, transactions (ACID (Atomicity, Consistency, Isolation, Durability)).
+*   **NoSQL (Not Only SQL) (Key-Value):** **DynamoDB** - High throughput, millisecond latency, simple queries. Shopping carts, user profiles.
+    *   **TTL (Time to Live):** Set a TTL attribute on items and DynamoDB automatically deletes them after expiry — at **no additional cost**. Ideal for session data, temporary tokens, or expiring cache entries.
+    *   **On-Demand Mode:** Handles unpredictable traffic (from zero to millions of requests) with no capacity planning. Pay per read/write request. Switch from provisioned to on-demand when traffic patterns are unknown.
+    *   **Composite Primary Keys + GSI:** A composite key (partition key + sort key) allows multiple items per partition with range queries on the sort key. Add a **Global Secondary Index (GSI)** to query on alternate attributes without scanning the table.
+*   **In-Memory:** **ElastiCache** - Microsecond latency. Caching, leaderboards, session store.
+*   **Data Warehouse:** **Redshift** - OLAP (Online Analytical Processing). Complex queries on petabytes of data. Columnar storage.
 
 ### 3.3.2 Caching Strategies
 
@@ -458,7 +527,27 @@ Caching relieves load on the backend database and improves latency for the user.
 
 ## 3.4 Design High-Performing Network Architectures
 
+### 3.4.1 High-Performance Networking Features
+
+*   **Enhanced Networking (ENA):** Uses Elastic Network Adapter (ENA). Provides higher bandwidth (up to 100Gbps) and lower inter-instance latency.
+*   **Elastic Fabric Adapter (EFA):** An ENA with added OS-bypass capabilities. Essential for **HPC (High-Performance Computing)** and ML (Machine Learning) workloads using MPI (Message Passing Interface).
+*   **Global Accelerator:** Uses the AWS global network to route traffic to the nearest healthy endpoint. Provides 2 static Anycast IPs. Best for low-latency, non-HTTP (Hypertext Transfer Protocol) traffic.
+    *   Supports both **TCP and UDP** over the AWS backbone — unlike CloudFront which only handles HTTP/HTTPS. For **UDP workloads** (gaming, IoT, VoIP) that need low latency across regions, Global Accelerator is the correct choice.
+    *   *Cross-Region Performance:* More cost-effective than deploying a full application stack in a second region. Traffic enters the AWS network at the nearest Edge Location and rides the backbone to the endpoint region, reducing jitter and packet loss.
+
+### 3.4.2 Connectivity Comparison
+
+| Connectivity Option | Bandwidth | Protocol / Security | Best For |
+| :--- | :--- | :--- | :--- |
+| **Site-to-Site VPN** | Up to 1.25 Gbps per tunnel | IPsec over Public Internet | Quick setup, low cost, encrypted. |
+| **Direct Connect (DX)** | 1 Gbps to 100 Gbps | Physical dedicated fiber | Predictable performance, low latency, no internet. |
+| **VPC Peering** | AWS Backbone speed | Internal AWS networking | Simple 1-to-1 connection between VPCs. |
+| **Transit Gateway** | Scale to Tbps | Hub-and-Spoke | Complex networks (connects 1000s of VPCs/On-prem). |
+
+*   **Transit Gateway + ECMP for VPN Throughput:** A single Site-to-Site VPN tunnel caps at ~**1.25 Gbps**. By attaching VPN connections to a **Transit Gateway** (instead of a Virtual Private Gateway), you enable **ECMP (Equal-Cost Multi-Path)** routing, which spreads traffic across multiple VPN tunnels simultaneously, aggregating bandwidth. For example, 4 tunnels ≈ 5 Gbps. This is the solution when VPN throughput is insufficient but internet bandwidth is available — no need to provision Direct Connect.
+
 *   **Amazon CloudFront:** Content Delivery Network (CDN). Caches static (and dynamic) content at Edge Locations closer to the user. Reduces latency and offloads origin.
+    *   *Custom Origins:* CloudFront can front **on-premises servers** (not just AWS resources). If an on-premises website goes viral and traffic spikes, placing CloudFront in front of it provides an **immediate solution** — CloudFront absorbs the traffic at edge locations and reduces load on the origin. No migration to AWS required.
 *   **AWS Global Accelerator:** Ingress traffic enters the AWS (Amazon Web Services) network at the closest Edge Location and travels over the AWS backbone (not public internet). Consistent performance, reduced jitter.
 *   **AWS Direct Connect:** Dedicated physical connection from on-premises to AWS. Consistent bandwidth and latency compared to VPN (Virtual Private Network) over internet.
 
@@ -469,6 +558,13 @@ Caching relieves load on the backend database and improves latency for the user.
 *   **Amazon Kinesis Data Streams:** Real-time ingestion of streaming data (logs, clickstreams) at scale. Manual consumption.
 *   **Amazon Kinesis Data Firehose:** Ingests streaming data and automatically loads it into S3 (Simple Storage Service), Redshift, or OpenSearch. Near real-time (60s buffer).
 *   **AWS Glue:** Serverless ETL (Extract, Transform, Load). Prepares data for analytics.
+*   **Amazon Athena:** Serverless interactive query service. Queries data directly in S3 using SQL. Pay per query (amount of data scanned).
+    *   **Performance Optimization:**
+        *   *Partition Data:* Organize S3 data into partitions (e.g., `s3://bucket/year=2026/month=03/region=us-east/`). Athena scans only relevant partitions instead of the entire dataset.
+        *   *Use Columnar Formats:* Convert CSV/JSON to **Apache Parquet** or **ORC**. These formats are compressed and columnar, so Athena scans far less data — improving speed and reducing cost.
+        *   *Compress Files:* Use Snappy or GZIP compression.
+        *   *Right-size Files:* Avoid many small files. Aim for files in the 128 MB–512 MB range.
+    *   *Exam Tip:* If Athena queries on CSV data are slow or failing, the answer is almost always: partition the data and convert to Parquet/ORC.
 *   **AWS Snow Family:**
     *   *Snowball Edge:* Physical device to move TBs/PBs of data to AWS when network is slow.
     *   *Snowmobile:* Exabyte scale (shipping container).
@@ -507,6 +603,16 @@ Cost optimization focuses on avoiding unnecessary costs and selecting the most a
 
 *   **S3 (Simple Storage Service) Lifecycle Policies:** Automate moving data to colder tiers (e.g., Move to IA (Infrequent Access) after 30 days, Glacier after 90 days).
 
+| Storage Class | Min Duration | Min Object Size | Retrieval Fee | Use Case |
+| :--- | :--- | :--- | :--- | :--- |
+| **Standard** | None | None | None | Active, frequent access. |
+| **Intelligent-Tiering** | None | None | None | Unknown or changing patterns. |
+| **Standard-IA** | 30 days | 128 KB | Per GB | Long-lived, infrequent access. |
+| **One Zone-IA** | 30 days | 128 KB | Per GB | Non-critical, infrequent access. |
+| **Glacier Instant** | 90 days | 128 KB | Per GB | Archival, millisecond retrieval. |
+| **Glacier Flexible** | 90 days | None | Per GB | Archival, minutes to hours. |
+| **Glacier Deep Archive** | 180 days | None | Per GB | Archival, 12-48 hours. |
+
 ### 4.1.2 EBS Cost Optimization
 
 *   **Delete unattached volumes:** EBS (Elastic Block Store) volumes persist (and cost money) even after the EC2 (Elastic Compute Cloud) instance is terminated, unless "Delete on Termination" is checked.
@@ -522,7 +628,19 @@ Cost optimization focuses on avoiding unnecessary costs and selecting the most a
     *   *Standard RI (Reserved Instance):* Can't change instance family. Higher discount.
     *   *Convertible RI (Reserved Instance):* Can change instance family. Lower discount.
 *   **Savings Plans:** Commit to $X/hour usage for 1 or 3 years. More flexible than RIs (Reserved Instances). Applies to EC2 (Elastic Compute Cloud), Fargate, and Lambda.
+    *   *Compute Savings Plans:* Apply to Lambda in addition to EC2 and Fargate. If Lambda runs millions of times monthly, a Compute Savings Plan can significantly reduce cost.
+*   **Lambda Cost Optimization:**
+    *   Lambda cost = (number of requests) x (duration) x (memory allocated). Duration is rounded up to the nearest 1 ms.
+    *   *Memory-Duration Tradeoff:* Increasing memory also increases CPU. A function with more memory may finish faster, reducing duration enough to **lower total cost** despite the higher per-ms price. Use **AWS Lambda Power Tuning** (open-source tool) to find the optimal memory setting.
+    *   *Example:* 512 MB / 2 min may cost more than 1536 MB / 40 sec because the tripled memory reduces duration by more than 3x.
 *   **Spot Instances:** Bidding on unused capacity. Up to 90% discount. *Can be interrupted with 2 minutes notice.* Use for fault-tolerant, stateless apps, batch processing.
+
+| Pricing Model | Payment | Commitment | Discount | Best For |
+| :--- | :--- | :--- | :--- | :--- |
+| **On-Demand** | Hourly/Sec | None | 0% | New apps, short-term, spiky. |
+| **Reserved (RI)** | Upfront/Monthly | 1 or 3 yrs | ~72% | Steady state (DBs, always-on). |
+| **Savings Plans** | Upfront/Monthly | 1 or 3 yrs | ~72% | Flexible compute usage (EC2, Lambda, Fargate). |
+| **Spot** | Hourly | None | ~90% | Stateless, batch, flexible start/end. |
 
 ### 4.2.2 Right-Sizing
 
@@ -533,8 +651,12 @@ Cost optimization focuses on avoiding unnecessary costs and selecting the most a
 
 ### 4.3.1 Database Costs
 
-*   **Serverless:** Aurora Serverless or DynamoDB On-Demand. Pay only when the DB is active/used. Good for infrequent/unpredictable workloads.
-*   **Provisioned:** DynamoDB Provisioned Capacity. Cheaper if you have predictable steady load.
+*   **Aurora Serverless v2:** Scales instantly from 0.5 to 128 ACUs (Aurora Capacity Units). Best for unpredictable or highly variable workloads.
+*   **DynamoDB Capacity Modes:**
+    *   **On-Demand:** Pay per request. Best for new/unpredictable workloads.
+    *   **Provisioned:** Pay per WCU/RCU (Write/Read Capacity Unit). Best for stable, predictable traffic. (Use **Auto Scaling** or **Reserved Capacity** for further savings).
+    *   *Flash Sale / Spike Pattern:* For sudden, massive traffic spikes (flash sales, viral events), switch from provisioned to **on-demand mode**. DynamoDB Auto Scaling relies on CloudWatch alarms and adjusts over minutes — too slow for instant spikes, causing `ProvisionedThroughputExceededException`. On-demand mode adapts instantly with no throttling. Switch back to provisioned after the event to reduce costs.
+*   **RDS Reserved Instances:** Commit to 1 or 3 years for significant savings on production databases.
 
 ### 4.3.2 Network Costs
 
@@ -544,6 +666,7 @@ Cost optimization focuses on avoiding unnecessary costs and selecting the most a
     *   Data transfer between AZs (Availability Zones) in the same region costs money (if using public or elastic IPs (Internet Protocols)).
     *   Use **Private IPs** to communicate between instances in the same region to reduce cost.
 *   **VPC (Virtual Private Cloud) Endpoints:** Using Gateway Endpoints for S3 (Simple Storage Service)/DynamoDB avoids NAT (Network Address Translation) Gateway processing charges.
+    *   *EMR / Big Data Pattern:* Amazon EMR clusters in private subnets read/write heavily to S3. Without a Gateway Endpoint, all S3 traffic routes through the NAT Gateway, incurring significant data processing charges. Adding an **S3 Gateway Endpoint** (free) to the VPC routes S3 traffic directly, eliminating NAT Gateway costs for S3 data transfer.
 *   **NAT (Network Address Translation) Gateway:** Charged per hour + per GB (Gigabyte) processed. Expensive for high throughput.
 
 ---
